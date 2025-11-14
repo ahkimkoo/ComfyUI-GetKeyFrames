@@ -257,3 +257,67 @@ def get_grid_aspect(num_images: int, image_width: int, image_height: int) -> (in
                 break
 
     return best_layout
+
+# --- Image Difference Calculation Functions ---
+
+def calculate_mse_diff(frames1_t, frames2_t):
+    """Calculates the Mean Squared Error between two batches of frames."""
+    diffs = frames1_t.float() - frames2_t.float()
+    return torch.mean(diffs ** 2, dim=(1, 2, 3))
+
+def calculate_ssim_diff(frames1_p, frames2_p):
+    """Calculates the Structural Similarity Index (SSIM) difference between two lists of PIL images."""
+    from skimage.metrics import structural_similarity as ssim
+    diffs = []
+    for i in range(len(frames1_p)):
+        # Convert images to grayscale numpy arrays for SSIM
+        im1 = np.array(frames1_p[i].convert('L'))
+        im2 = np.array(frames2_p[i].convert('L'))
+        # SSIM returns a value between -1 and 1, where 1 is perfect similarity.
+        # We want the difference, so we use 1 - ssim.
+        similarity = ssim(im1, im2, data_range=im2.max() - im2.min())
+        diffs.append(1.0 - similarity)
+    return torch.tensor(diffs, device=device)
+
+def calculate_phash_diff(frames1_p, frames2_p):
+    """Calculates the perceptual hash (pHash) difference between two lists of PIL images."""
+    import imagehash
+    diffs = []
+    for i in range(len(frames1_p)):
+        hash1 = imagehash.phash(frames1_p[i])
+        hash2 = imagehash.phash(frames2_p[i])
+        # The difference is the number of bits that are different (Hamming distance).
+        # We normalize it by the total number of bits in the hash (usually 64).
+        diffs.append((hash1 - hash2) / len(hash1))
+    return torch.tensor(diffs, device=device)
+
+def calculate_contrast(frame_p):
+    """Calculates the RMS contrast of a single PIL image."""
+    # Convert to grayscale numpy array
+    im = np.array(frame_p.convert('L'), dtype=float)
+    return im.std()
+
+def calculate_edge_diff(frame1_p, frame2_p, focus_ratio=0.3):
+    """Calculates the difference between the edges of the central focused area of two PIL images."""
+    import cv2
+
+    def process_frame(frame):
+        # Crop to central focus area
+        w, h = frame.size
+        crop_w, crop_h = int(w * focus_ratio), int(h * focus_ratio)
+        left, top = (w - crop_w) // 2, (h - crop_h) // 2
+        right, bottom = left + crop_w, top + crop_h
+        cropped = frame.crop((left, top, right, bottom))
+        
+        # Convert to grayscale numpy array
+        gray = np.array(cropped.convert('L'))
+        
+        # Apply Laplacian operator to detect edges
+        edges = cv2.Laplacian(gray, cv2.CV_64F)
+        return edges
+
+    edges1 = process_frame(frame1_p)
+    edges2 = process_frame(frame2_p)
+    
+    # Calculate Mean Squared Error between the edge maps
+    return np.mean((edges1 - edges2) ** 2)
