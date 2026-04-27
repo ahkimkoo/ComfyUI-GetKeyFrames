@@ -1,44 +1,190 @@
-# MakeFrame
+# ComfyUI-GetKeyFrames
 
-## GetKeyFrames:
-This node intelligently extracts keyframes from a sequence of images by first detecting scene changes and then selecting representative frames from within each scene.
+[![PyPI version](https://img.shields.io/badge/version-2.0.0-blue)](https://github.com/ahkimkoo/ComfyUI-GetKeyFrames)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-available-orange)](https://registry.comfy.org)
 
-**Workflow:**
-1.  **Scene Detection**: The node calculates the difference between consecutive frames. Any difference exceeding the `threshold` marks a potential scene cut.
-2.  **Priority Filtering**: If the number of detected scenes is greater than `num_keyframes`, the node automatically prioritizes and selects only the scenes separated by the most significant changes. This ensures that the final output is focused on the most important moments, even with a low threshold.
-3.  **Dynamic Allocation**: The total `num_keyframes` are intelligently distributed among these top-priority scenes.
-4.  **Frame Extraction**: Within each scene, the allocated number of keyframes are sampled uniformly to represent the entire scene segment.
+ComfyUI 自定义节点，从视频帧序列中智能提取关键帧，并提供网格拼合与拆分工具。
 
-**Parameters:**
-- **`scene_cut_method`**: The algorithm for comparing frames to detect scene cuts.
-  - **MSE**: Fast, good for sharp cuts.
-  - **SSIM**: Slower, but closer to human perception.
-  - **pHash**: Robust against minor edits.
-- **`scene_select_method`**: The algorithm for selecting keyframes *within* each detected scene. All non-uniform methods use a peak-finding algorithm to ensure the selected frames are distributed and represent distinct moments of change.
-  - **Uniform**: Default. Selects frames evenly distributed throughout the scene.
-  - **Peak_Difference**: Selects frames that are most different from the start of the scene, capturing the climax of the action.
-  - **Edge_Change_Rate**: A sophisticated method that focuses on the central area of the frame, detecting the rate of change in structural edges to find moments of highest action.
-  - **Highest_Contrast**: Selects frames with the highest visual contrast, often corresponding to the most visually striking moments.
-- **`num_keyframes`**: The total number of keyframes you want to extract across all scenes.
-- **`threshold`**: The core parameter for scene detection, **acting on a normalized 0.0-1.0 scale for all methods**. It defines the minimum relative change required to be considered a scene cut. A value of `0.1` means only changes in the top 90% of intensity are considered. A good starting point for all methods is `0.1` to `0.2`.
-- **`central_focus_ratio`**: **(Only used when `scene_select_method` is `Edge_Change_Rate`)**. Defines the size of the central area to analyze (e.g., 0.3 means the central 30% of the image).
-
-![image](https://github.com/LonicaMewinsky/ComfyUI-MakeFrame/assets/93007558/ce9de415-d9c4-43ac-94ba-7b8af52e5927)
-
-## MakeGrid:
-Plots given images on a grid. Calculates number of rows and columns for most even aspect ratio.
-* For concurrent frame generation. Creates potentially massive image.
-* Images are resized to be evenly-divisible by rows, columns, and 8 (to prevent "resize wobble").
-* Empty cells are padded with repeats of last image. Black space frustrates generation.
-
-![image](https://github.com/LonicaMewinsky/ComfyUI-MakeFrame/assets/93007558/ac61e777-b5d9-48d5-b20f-57ff1c320d7c)
-
-## BreakGrid:
-Breaks given image grid(s) back into individual images. Good practice to use rows/columns output from MakeGrid.
-
-![image](https://github.com/LonicaMewinsky/ComfyUI-MakeFrame/assets/93007558/6a9a5743-4a43-470b-8e10-2f96a2836c8d)
+基于 [LonicaMewinsky/ComfyUI-MakeFrame](https://github.com/LonicaMewinsky/ComfyUI-MakeFrame) 改进而来，v2 完全重写了关键帧提取算法。
 
 ---
 
-## Acknowledgement
-This project is a modified version based on the original work by LonicaMewinsky. The original repository can be found at [https://github.com/LonicaMewinsky/ComfyUI-MakeFrame](https://github.com/LonicaMewinsky/ComfyUI-MakeFrame).
+## 安装
+
+### 通过 ComfyUI Manager（推荐）
+
+在 ComfyUI Manager 中搜索 **GetKeyFrames** 并安装。
+
+### 手动安装
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/ahkimkoo/ComfyUI-GetKeyFrames.git
+```
+
+依赖会在首次加载时自动安装。若自动安装失败，请手动执行：
+
+```bash
+pip install opencv-python scikit-image ImageHash
+```
+
+---
+
+## 节点一览
+
+| 节点 | 功能 |
+|------|------|
+| **GetKeyFrames** | 从帧序列中智能提取关键帧（场景检测 + 帧选取） |
+| **MakeGrid** | 将多张图像拼合为网格大图（适配并行帧生成工作流） |
+| **BreakGrid** | 将网格图拆分回单张图像 |
+
+---
+
+## GetKeyFrames
+
+智能提取关键帧节点。采用多阶段管线：**场景检测 → 优先级过滤 → 动态配额分配 → 帧内选取**。
+
+### 处理流程
+
+```
+输入帧序列
+  │
+  ▼
+① 逐帧差异计算（可选用 MSE / SSIM / pHash）
+  │
+  ▼
+② 归一化差异值，按阈值切分场景
+  │
+  ▼
+③ 若场景数 > 目标关键帧数 → 按差异幅度保留最显著的 N-1 个场景切点
+  │
+  ▼
+④ 按场景长度动态分配关键帧配额
+  │
+  ▼
+⑤ 在每个场景内按选定策略提取帧
+  │
+  ▼
+输出：关键帧图像批次 + 帧索引字符串
+```
+
+### 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `frames` | IMAGE | — | 输入帧序列（ComfyUI 标准 IMAGE 类型） |
+| `scene_cut_method` | 选择 | MSE | 场景切分算法，见下表 |
+| `scene_select_method` | 选择 | Uniform | 场景内帧选取策略，见下表 |
+| `num_keyframes` | INT | 12 | 目标提取的关键帧总数（1 ~ 4096） |
+| `threshold` | FLOAT | 0.1 | 场景切分阈值（0.0 ~ 10000.0），作用于归一化后的差异值 |
+| `central_focus_ratio` | FLOAT | 0.3 | 中心区域比例，仅 `Edge_Change_Rate` 策略使用（0.1 ~ 1.0） |
+
+#### scene_cut_method（场景切分算法）
+
+| 方法 | 原理 | 特点 |
+|------|------|------|
+| **MSE** | 均方误差 | 速度快，适合检测硬切 |
+| **SSIM** | 结构相似度 | 较慢，但更贴近人眼感知 |
+| **pHash** | 感知哈希 | 对微小编辑鲁棒，适合检测内容变化 |
+
+> 所有方法的差异值在比较前会归一化到 `[0.0, 1.0]`，因此 `threshold` 参数在不同方法间具有一致的含义。`0.1` 意味着只保留差异强度排名前 10% 的帧间变化。推荐起始值：`0.1` ~ `0.2`。
+
+#### scene_select_method（场景内帧选取策略）
+
+| 方法 | 原理 | 适用场景 |
+|------|------|----------|
+| **Uniform** | 在场景内均匀采样 | 通用，保证时间覆盖 |
+| **Peak_Difference** | 选取与场景首帧差异最大的帧 | 捕捉动作高潮 |
+| **Edge_Change_Rate** | 对画面中心区域计算边缘变化率 | 检测结构性的剧烈变化 |
+| **Highest_Contrast** | 选取 RMS 对比度最高的帧 | 选取视觉冲击力最强的帧 |
+
+> 除 `Uniform` 外，其余策略均使用**带抑制的峰值检测算法**（non-maximum suppression），确保选取的帧在时间上分散、代表不同的变化时刻。
+
+### 输出
+
+| 端口 | 类型 | 说明 |
+|------|------|------|
+| `Keyframes` | IMAGE | 提取的关键帧图像批次 |
+| `keyframe_indices` | STRING | 关键帧在原序列中的索引，逗号分隔（如 `"0, 5, 12, 23, 30"`） |
+
+### 使用提示
+
+- **低阈值（0.05 ~ 0.1）**：检测更多场景变化，适合快节奏视频。节点会自动按差异幅度保留最重要的场景。
+- **高阈值（0.3 ~ 0.5）**：只保留显著变化，适合慢节奏或场景切换明显的视频。
+- **`num_keyframes` 大于帧间差异点数量时**：所有场景都会被保留，关键帧会均匀分配到各场景中。
+- **输出的 `keyframe_indices` 字符串**可用于后续节点（如 VHS-VideoCombine 的帧选择）精确定位关键帧。
+
+---
+
+## MakeGrid
+
+将多张图像拼合为一张网格大图，适配并行帧生成工作流。
+
+### 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `frames` | IMAGE | — | 输入图像批次 |
+| `max_width` | INT | 2048 | 输出网格最大宽度（64 ~ 8000，步长 8） |
+| `max_height` | INT | 2048 | 输出网格最大高度（64 ~ 8000，步长 8） |
+
+### 行为说明
+
+1. 自动计算最佳行列数，使网格宽高比尽量接近 1:1
+2. 所有图像统一缩放到相同尺寸（宽高对齐到 8 的倍数，避免扩散模型生成时的尺寸抖动）
+3. 空位使用最后一帧填充（黑色空位会干扰生成质量）
+4. 最终网格尺寸会被约束在 `max_width` × `max_height` 以内
+
+### 输出
+
+| 端口 | 类型 | 说明 |
+|------|------|------|
+| `Grid` | IMAGE | 拼合后的网格图像 |
+| `Rows` | INT | 网格行数 |
+| `Columns` | INT | 网格列数 |
+
+> 💡 建议将 `Rows` 和 `Columns` 输出传给 `BreakGrid` 节点，确保准确拆分。
+
+---
+
+## BreakGrid
+
+将网格图拆分回单张图像。
+
+### 参数
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `grid` | IMAGE | 输入的网格图像 |
+| `rows` | INT | 网格行数（通常来自 MakeGrid 的输出） |
+| `columns` | INT | 网格列数（通常来自 MakeGrid 的输出） |
+
+### 输出
+
+| 端口 | 类型 | 说明 |
+|------|------|------|
+| `Frames` | IMAGE | 拆分后的单帧图像批次 |
+
+---
+
+## 依赖
+
+| 包 | 用途 |
+|----|------|
+| `torch` | 张量计算（ComfyUI 已包含） |
+| `numpy` | 数值运算（ComfyUI 已包含） |
+| `Pillow` | 图像处理（ComfyUI 已包含） |
+| `opencv-python` | 边缘检测（Edge_Change_Rate 策略） |
+| `scikit-image` | SSIM 结构相似度计算 |
+| `ImageHash` | pHash 感知哈希计算 |
+
+---
+
+## 致谢
+
+本项目基于 [LonicaMewinsky/ComfyUI-MakeFrame](https://github.com/LonicaMewinsky/ComfyUI-MakeFrame) 改进而来。
+
+## 许可证
+
+[MIT License](LICENSE)
